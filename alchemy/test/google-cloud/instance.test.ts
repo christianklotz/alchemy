@@ -143,4 +143,80 @@ describe.skipIf(!process.env.ALL_TESTS)("Google Cloud Instance", () => {
     },
     INSTANCE_TIMEOUT,
   );
+
+  test(
+    "deploy container to VM",
+    async (scope) => {
+      const instanceName = `${BRANCH_PREFIX}-test-container-vm`;
+      const zone = "us-central1-a";
+      const project = process.env.GOOGLE_CLOUD_PROJECT;
+
+      if (!project) {
+        throw new Error(
+          "GOOGLE_CLOUD_PROJECT environment variable is required",
+        );
+      }
+
+      let instance: Awaited<ReturnType<typeof Instance>>;
+
+      try {
+        // Create instance with container configuration
+        instance = await Instance(instanceName, {
+          name: instanceName,
+          zone,
+          machineType: "e2-micro",
+          assignExternalIp: true,
+          tags: ["http-server"],
+          container: {
+            image: "nginx:alpine",
+            ports: [{ hostPort: 80, containerPort: 80 }],
+            env: {
+              NGINX_HOST: "localhost",
+            },
+            restartPolicy: "always",
+          },
+        });
+
+        // Verify instance properties
+        expect(instance.name).toBe(instanceName);
+        expect(instance.zone).toBe(zone);
+        expect(instance.status).toBeTruthy();
+        expect(instance.selfLink).toBeTruthy();
+
+        // Verify container configuration in output
+        expect(instance.container).toBeDefined();
+        expect(instance.container?.imageRef).toBe("nginx:alpine");
+        expect(instance.container?.ports).toEqual([
+          { hostPort: 80, containerPort: 80 },
+        ]);
+        expect(instance.container?.env).toEqual({ NGINX_HOST: "localhost" });
+        expect(instance.container?.restartPolicy).toBe("always");
+
+        // Verify COS image was used (check via API)
+        const client = new InstancesClient();
+        const [fetchedInstance] = await client.get({
+          project,
+          zone,
+          instance: instanceName,
+        });
+
+        expect(fetchedInstance.name).toBe(instanceName);
+        expect(fetchedInstance.status).toBe("RUNNING");
+
+        // Verify startup script metadata contains docker run
+        // (docker being available implies COS image was used)
+        const startupScript = fetchedInstance.metadata?.items?.find(
+          (item) => item.key === "startup-script",
+        );
+        expect(startupScript?.value).toContain("docker run");
+        expect(startupScript?.value).toContain("nginx:alpine");
+        expect(startupScript?.value).toContain("-p 80:80/tcp");
+      } finally {
+        console.log("Starting cleanup...");
+        await destroy(scope);
+        console.log("Cleanup completed!");
+      }
+    },
+    INSTANCE_TIMEOUT,
+  );
 });

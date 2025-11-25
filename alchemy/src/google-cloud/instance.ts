@@ -1,9 +1,97 @@
 import type { protos } from "@google-cloud/compute";
 import type { Context } from "../context.ts";
+import type { Image } from "../docker/image.ts";
 import { Resource, ResourceKind } from "../resource.ts";
 import { logger } from "../util/logger.ts";
 import type { GoogleCloudClientProps } from "./client-props.ts";
 import { resolveGoogleCloudCredentials } from "./credentials.ts";
+
+/**
+ * Port mapping for container configuration.
+ */
+export interface ContainerPortMapping {
+  /**
+   * Port on the host VM.
+   */
+  hostPort: number;
+
+  /**
+   * Port inside the container.
+   */
+  containerPort: number;
+
+  /**
+   * Protocol for the port mapping.
+   * @default "tcp"
+   */
+  protocol?: "tcp" | "udp";
+}
+
+/**
+ * Volume mount for container configuration.
+ */
+export interface ContainerVolumeMount {
+  /**
+   * Path on the host VM.
+   */
+  hostPath: string;
+
+  /**
+   * Path inside the container.
+   */
+  containerPath: string;
+
+  /**
+   * Whether the mount is read-only.
+   * @default false
+   */
+  readOnly?: boolean;
+}
+
+/**
+ * Container configuration for running a container on a Google Cloud VM.
+ * When specified, the instance uses Container-Optimized OS and runs the container via docker.
+ */
+export interface ContainerConfig {
+  /**
+   * Container image - either an Alchemy Image resource or a string reference.
+   * Image resource handles build+push to registries.
+   * String can be a public image (e.g., "nginx:alpine") or a registry URL.
+   */
+  image: Image | string;
+
+  /**
+   * Environment variables for the container.
+   */
+  env?: Record<string, string>;
+
+  /**
+   * Port mappings from host to container.
+   */
+  ports?: ContainerPortMapping[];
+
+  /**
+   * Volume mounts from host to container.
+   */
+  volumes?: ContainerVolumeMount[];
+
+  /**
+   * Restart policy for the container.
+   * @default "always"
+   */
+  restartPolicy?: "always" | "on-failure" | "no";
+
+  /**
+   * Override the container's default command.
+   */
+  command?: string[];
+
+  /**
+   * Run the container in privileged mode.
+   * @default false
+   */
+  privileged?: boolean;
+}
 
 /**
  * Properties for creating or updating a Google Cloud Compute Engine instance.
@@ -70,12 +158,32 @@ export interface InstanceProps extends GoogleCloudClientProps {
    * Tags for firewall rules.
    */
   tags?: string[];
+
+  /**
+   * Container configuration. When specified:
+   * - Uses Container-Optimized OS (cos-cloud/cos-stable)
+   * - Generates startup script to pull and run the container
+   * - sourceImage prop is ignored
+   */
+  container?: ContainerConfig;
+}
+
+/**
+ * Resolved container configuration in the output.
+ */
+export interface ResolvedContainerConfig
+  extends Omit<ContainerConfig, "image"> {
+  /**
+   * Resolved image reference used for deployment.
+   * This is the actual image URL/tag that was deployed.
+   */
+  imageRef: string;
 }
 
 /**
  * Output type for a Google Cloud Compute Engine instance.
  */
-export type Instance = Omit<InstanceProps, "keyFilename"> & {
+export type Instance = Omit<InstanceProps, "keyFilename" | "container"> & {
   /**
    * The instance self-link URL.
    */
@@ -111,6 +219,11 @@ export type Instance = Omit<InstanceProps, "keyFilename"> & {
   createdAt: string;
 
   /**
+   * Container configuration with resolved image reference.
+   */
+  container?: ResolvedContainerConfig;
+
+  /**
    * Resource type identifier.
    */
   type: "google-cloud-instance";
@@ -125,6 +238,120 @@ export function isInstance(resource: unknown): resource is Instance {
     resource !== null &&
     (resource as any)[ResourceKind] === "google-cloud::Instance"
   );
+}
+
+/**
+ * Container-Optimized OS image for container deployments.
+ *
+ * COS is a minimal, security-hardened OS maintained by Google with Docker pre-installed.
+ *
+ * @see https://cloud.google.com/container-optimized-os/docs
+ */
+const COS_IMAGE = "projects/cos-cloud/global/images/family/cos-stable";
+
+/**
+ * Generate a startup script for running a container on Container-Optimized OS.
+ *
+ * This approach uses COS + startup script with `docker run` instead of the
+ * `create-with-container` API because:
+ *
+ * 1. The `create-with-container` API is deprecated and only available via
+ *    Console/CLI, not the Compute API
+ * 2. Google recommends using startup scripts or cloud-init for container
+ *    orchestration
+ * 3. This approach provides more flexibility (custom docker run options,
+ *    multiple containers, etc.)
+ *
+ * @see https://cloud.google.com/compute/docs/containers - Container deployment overview
+ * @see https://cloud.google.com/compute/docs/containers/deploying-containers - Deployment guide
+ * @see https://cloud.google.com/compute/docs/containers/configuring-options-to-run-containers - Configuration options
+ */
+function generateContainerStartupScript(
+  container: ContainerConfig,
+  imageRef: string,
+): string {
+  const lines: string[] = ["#!/bin/bash", "set -e", ""];
+
+  // Check if this is an Artifact Registry or GCR image that needs auth
+  const needsGcloudAuth =
+    imageRef.includes(".pkg.dev") || imageRef.includes("gcr.io");
+
+  if (needsGcloudAuth) {
+    // Extract the registry host for gcloud auth
+    const registryHost = imageRef.split("/")[0];
+    lines.push(`# Authenticate to Google Container Registry`);
+    lines.push(
+      `/usr/share/google/dockercfg_update.sh || gcloud auth configure-docker ${registryHost} --quiet`,
+    );
+    lines.push("");
+  }
+
+  // Build docker run command
+  const dockerArgs: string[] = ["docker", "run", "-d"];
+
+  // Container name
+  dockerArgs.push("--name", "alchemy-container");
+
+  // Restart policy
+  const restartPolicy = container.restartPolicy ?? "always";
+  dockerArgs.push("--restart", restartPolicy);
+
+  // Privileged mode
+  if (container.privileged) {
+    dockerArgs.push("--privileged");
+  }
+
+  // Port mappings
+  if (container.ports) {
+    for (const port of container.ports) {
+      const protocol = port.protocol ?? "tcp";
+      dockerArgs.push(
+        "-p",
+        `${port.hostPort}:${port.containerPort}/${protocol}`,
+      );
+    }
+  }
+
+  // Environment variables
+  if (container.env) {
+    for (const [key, value] of Object.entries(container.env)) {
+      // Escape single quotes in values
+      const escapedValue = value.replace(/'/g, "'\\''");
+      dockerArgs.push("-e", `${key}='${escapedValue}'`);
+    }
+  }
+
+  // Volume mounts
+  if (container.volumes) {
+    for (const vol of container.volumes) {
+      const mountOpt = vol.readOnly ? ":ro" : "";
+      dockerArgs.push("-v", `${vol.hostPath}:${vol.containerPath}${mountOpt}`);
+    }
+  }
+
+  // Image reference
+  dockerArgs.push(imageRef);
+
+  // Command override
+  if (container.command && container.command.length > 0) {
+    dockerArgs.push(...container.command);
+  }
+
+  lines.push("# Pull and run the container");
+  lines.push(dockerArgs.join(" \\\n  "));
+
+  return lines.join("\n");
+}
+
+/**
+ * Resolve the image reference from a ContainerConfig.
+ */
+function resolveImageRef(container: ContainerConfig): string {
+  if (typeof container.image === "string") {
+    return container.image;
+  }
+  // Image resource - prefer repoDigest for immutability, fallback to imageRef
+  return container.image.repoDigest ?? container.image.imageRef;
 }
 
 /**
@@ -176,6 +403,25 @@ export function isInstance(resource: unknown): resource is Instance {
  * ```
  *
  * @example
+ * ## Deploy a container to a VM
+ *
+ * Creates a VM running a container using Container-Optimized OS.
+ *
+ * ```ts
+ * import { Instance } from "alchemy/google-cloud";
+ *
+ * const vm = await Instance("container-vm", {
+ *   zone: "us-central1-a",
+ *   machineType: "e2-small",
+ *   container: {
+ *     image: "nginx:alpine",
+ *     ports: [{ hostPort: 80, containerPort: 80 }],
+ *     env: { NGINX_HOST: "example.com" },
+ *   },
+ * });
+ * ```
+ *
+ * @example
  * ## Create a VM with explicit project
  *
  * Specifies the GCP project explicitly.
@@ -212,13 +458,38 @@ export const Instance = Resource(
       props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
     const zone = props.zone;
     const machineType = props.machineType ?? "e2-medium";
-    const sourceImage =
-      props.sourceImage ??
-      "projects/debian-cloud/global/images/family/debian-11";
+
+    // Resolve container configuration if specified
+    let resolvedContainer: ResolvedContainerConfig | undefined;
+    let containerImageRef: string | undefined;
+    if (props.container) {
+      containerImageRef = resolveImageRef(props.container);
+      const { image: _image, ...containerWithoutImage } = props.container;
+      resolvedContainer = {
+        ...containerWithoutImage,
+        imageRef: containerImageRef,
+      };
+    }
+
+    // Use COS image if container is specified, otherwise use provided/default image
+    const sourceImage = props.container
+      ? COS_IMAGE
+      : (props.sourceImage ??
+        "projects/debian-cloud/global/images/family/debian-11");
+
     const diskSizeGb = props.diskSizeGb ?? 10;
     const diskType = props.diskType ?? "pd-standard";
     const network = props.network ?? "default";
     const assignExternalIp = props.assignExternalIp ?? true;
+
+    // Generate startup script - container script takes precedence
+    let startupScript = props.startupScript;
+    if (props.container && containerImageRef) {
+      startupScript = generateContainerStartupScript(
+        props.container,
+        containerImageRef,
+      );
+    }
 
     // Import the compute client dynamically to handle optional peer dependency
     const { InstancesClient, ZoneOperationsClient } = await import(
@@ -286,6 +557,22 @@ export const Instance = Resource(
         );
         return this.replace();
       }
+      // Container image change requires replacement (startup script is baked into instance)
+      if (containerImageRef !== this.output.container?.imageRef) {
+        logger.log(
+          `Container image changed from ${this.output.container?.imageRef} to ${containerImageRef}, replacing instance`,
+        );
+        return this.replace();
+      }
+      // Adding or removing container requires replacement
+      if (!!props.container !== !!this.output.container) {
+        logger.log(
+          `Container configuration ${
+            props.container ? "added" : "removed"
+          }, replacing instance`,
+        );
+        return this.replace();
+      }
     }
 
     // Build the instance resource
@@ -318,12 +605,12 @@ export const Instance = Resource(
       ],
       labels: props.labels,
       tags: props.tags ? { items: props.tags } : undefined,
-      metadata: props.startupScript
+      metadata: startupScript
         ? {
             items: [
               {
                 key: "startup-script",
-                value: props.startupScript,
+                value: startupScript,
               },
             ],
           }
@@ -457,9 +744,10 @@ export const Instance = Resource(
       diskType,
       network,
       assignExternalIp,
-      startupScript: props.startupScript,
+      startupScript: props.container ? undefined : props.startupScript,
       labels: props.labels,
       tags: props.tags,
+      container: resolvedContainer,
       selfLink: instance.selfLink || "",
       status: (instance.status as Instance["status"]) || "RUNNING",
       internalIp,
