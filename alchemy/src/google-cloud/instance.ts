@@ -166,6 +166,14 @@ export interface InstanceProps extends GoogleCloudClientProps {
    * - sourceImage prop is ignored
    */
   container?: ContainerConfig;
+
+  /**
+   * Service account scopes for the instance.
+   * When container is specified, defaults to ["https://www.googleapis.com/auth/cloud-platform"]
+   * to allow pulling images from Artifact Registry.
+   * @default ["https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write"]
+   */
+  serviceAccountScopes?: string[];
 }
 
 /**
@@ -224,6 +232,11 @@ export type Instance = Omit<InstanceProps, "keyFilename" | "container"> & {
   container?: ResolvedContainerConfig;
 
   /**
+   * Service account scopes.
+   */
+  serviceAccountScopes?: string[];
+
+  /**
    * Resource type identifier.
    */
   type: "google-cloud-instance";
@@ -277,12 +290,13 @@ function generateContainerStartupScript(
     imageRef.includes(".pkg.dev") || imageRef.includes("gcr.io");
 
   if (needsGcloudAuth) {
-    // Extract the registry host for gcloud auth
+    // Extract the registry host for docker-credential-gcr
     const registryHost = imageRef.split("/")[0];
     lines.push(`# Authenticate to Google Container Registry`);
-    lines.push(
-      `/usr/share/google/dockercfg_update.sh || gcloud auth configure-docker ${registryHost} --quiet`,
-    );
+    lines.push(`# On COS, use docker-credential-gcr with a writable config directory`);
+    lines.push(`export HOME=/home/chronos`);
+    lines.push(`mkdir -p /home/chronos/.docker`);
+    lines.push(`docker-credential-gcr configure-docker --registries=${registryHost}`);
     lines.push("");
   }
 
@@ -615,6 +629,22 @@ export const Instance = Resource(
             ],
           }
         : undefined,
+      // Service account with scopes for registry access
+      serviceAccounts: [
+        {
+          email: "default",
+          scopes:
+            props.serviceAccountScopes ??
+            (props.container
+              ? // Container deployments need broader scope for Artifact Registry
+                ["https://www.googleapis.com/auth/cloud-platform"]
+              : // Default scopes for basic logging
+                [
+                  "https://www.googleapis.com/auth/devstorage.read_only",
+                  "https://www.googleapis.com/auth/logging.write",
+                ]),
+        },
+      ],
     };
 
     let instance: protos.google.cloud.compute.v1.IInstance;
@@ -748,6 +778,7 @@ export const Instance = Resource(
       labels: props.labels,
       tags: props.tags,
       container: resolvedContainer,
+      serviceAccountScopes: props.serviceAccountScopes,
       selfLink: instance.selfLink || "",
       status: (instance.status as Instance["status"]) || "RUNNING",
       internalIp,
