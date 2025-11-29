@@ -235,15 +235,19 @@ export interface InstanceProps extends GoogleCloudClientProps {
    * These are separate from the boot disk and can be Disk resources or disk selfLink strings.
    */
   additionalDisks?: AttachedDiskConfig[];
+
+  /**
+   * Whether to automatically reboot the instance when the startup script changes.
+   * @default true
+   */
+  rebootOnStartupScriptChange?: boolean;
 }
 
 /**
  * Resolved container configuration in the output.
  */
-export interface ResolvedContainerConfig extends Omit<
-  ContainerConfig,
-  "image"
-> {
+export interface ResolvedContainerConfig
+  extends Omit<ContainerConfig, "image"> {
   /**
    * Resolved image reference used for deployment.
    * This is the actual image URL/tag that was deployed.
@@ -621,8 +625,9 @@ export const Instance = Resource(
     }
 
     // Import the compute client dynamically to handle optional peer dependency
-    const { InstancesClient, ZoneOperationsClient } =
-      await import("@google-cloud/compute");
+    const { InstancesClient, ZoneOperationsClient } = await import(
+      "@google-cloud/compute"
+    );
 
     // Create clients with resolved credentials
     const clientOptions: { projectId?: string; keyFilename?: string } = {};
@@ -845,6 +850,132 @@ export const Instance = Resource(
               zone,
               tagsOperation.name,
             );
+          }
+        }
+      }
+
+      // Update startup script if changed
+      const currentStartupScript = currentInstance.metadata?.items?.find(
+        (item) => item.key === "startup-script",
+      )?.value;
+
+      if (startupScript !== currentStartupScript) {
+        logger.log(`Updating startup script for instance: ${name}`);
+
+        // Build new metadata items, preserving non-startup-script items
+        const newMetadataItems =
+          currentInstance.metadata?.items?.filter(
+            (item) => item.key !== "startup-script",
+          ) || [];
+
+        if (startupScript) {
+          newMetadataItems.push({
+            key: "startup-script",
+            value: startupScript,
+          });
+        }
+
+        const [metadataOperation] = await instancesClient.setMetadata({
+          project,
+          zone,
+          instance: name,
+          metadataResource: {
+            fingerprint: currentInstance.metadata?.fingerprint,
+            items: newMetadataItems,
+          },
+        });
+
+        if (metadataOperation.name) {
+          await waitForZoneOperation(
+            operationsClient,
+            project,
+            zone,
+            metadataOperation.name,
+          );
+        }
+
+        // Reboot instance to apply new startup script
+        const rebootOnChange = props.rebootOnStartupScriptChange ?? true;
+        if (rebootOnChange) {
+          logger.log(`Rebooting instance to apply new startup script: ${name}`);
+
+          const [resetOperation] = await instancesClient.reset({
+            project,
+            zone,
+            instance: name,
+          });
+
+          if (resetOperation.name) {
+            await waitForZoneOperation(
+              operationsClient,
+              project,
+              zone,
+              resetOperation.name,
+            );
+          }
+
+          logger.log(`  Instance ${name} rebooted`);
+        }
+      }
+
+      // Reconcile additional disks
+      const currentNonBootDisks =
+        currentInstance.disks?.filter((d) => !d.boot) || [];
+      const currentDiskSources = new Set(
+        currentNonBootDisks.map((d) => d.source),
+      );
+      const desiredDiskSources = new Set(
+        resolvedAdditionalDisks.map((d) => d.diskSelfLink),
+      );
+
+      // Attach new disks
+      for (const resolvedDisk of resolvedAdditionalDisks) {
+        if (!currentDiskSources.has(resolvedDisk.diskSelfLink)) {
+          logger.log(`Attaching disk: ${resolvedDisk.diskSelfLink}`);
+          const [attachOperation] = await instancesClient.attachDisk({
+            project,
+            zone,
+            instance: name,
+            attachedDiskResource: {
+              source: resolvedDisk.diskSelfLink,
+              deviceName: resolvedDisk.deviceName,
+              mode: resolvedDisk.mode,
+              autoDelete: resolvedDisk.autoDelete,
+            },
+          });
+
+          if (attachOperation.name) {
+            await waitForZoneOperation(
+              operationsClient,
+              project,
+              zone,
+              attachOperation.name,
+            );
+          }
+        }
+      }
+
+      // Detach removed disks
+      for (const currentDisk of currentNonBootDisks) {
+        if (currentDisk.source && !desiredDiskSources.has(currentDisk.source)) {
+          const deviceName = currentDisk.deviceName;
+          if (deviceName) {
+            logger.log(`Detaching disk: ${deviceName}`);
+            const [detachOperation] = await instancesClient.detachDisk({
+              project,
+              zone,
+              instance: name,
+              deviceName,
+            });
+
+            if (detachOperation.name) {
+              await waitForZoneOperation(
+                operationsClient,
+                project,
+                zone,
+                detachOperation.name,
+              );
+            }
           }
         }
       }
