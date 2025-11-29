@@ -5,6 +5,8 @@ import { Resource, ResourceKind } from "../resource.ts";
 import { logger } from "../util/logger.ts";
 import type { GoogleCloudClientProps } from "./client-props.ts";
 import { resolveGoogleCloudCredentials } from "./credentials.ts";
+import type { Disk } from "./disk.ts";
+import { isDisk } from "./disk.ts";
 
 /**
  * Port mapping for container configuration.
@@ -94,6 +96,59 @@ export interface ContainerConfig {
 }
 
 /**
+ * Configuration for attaching an additional disk to an instance.
+ */
+export interface AttachedDiskConfig {
+  /**
+   * The disk to attach. Can be a Disk resource or a disk selfLink/name string.
+   */
+  disk: Disk | string;
+
+  /**
+   * Custom device name for the disk.
+   * This will appear as /dev/disk/by-id/google-{deviceName} in the instance.
+   */
+  deviceName?: string;
+
+  /**
+   * Disk access mode.
+   * @default "READ_WRITE"
+   */
+  mode?: "READ_WRITE" | "READ_ONLY";
+
+  /**
+   * Whether to automatically delete the disk when the instance is deleted.
+   * @default false
+   */
+  autoDelete?: boolean;
+}
+
+/**
+ * Resolved attached disk configuration in the output.
+ */
+export interface ResolvedAttachedDisk {
+  /**
+   * The disk selfLink URL.
+   */
+  diskSelfLink: string;
+
+  /**
+   * Device name for the disk.
+   */
+  deviceName?: string;
+
+  /**
+   * Disk access mode.
+   */
+  mode: "READ_WRITE" | "READ_ONLY";
+
+  /**
+   * Whether the disk auto-deletes with the instance.
+   */
+  autoDelete: boolean;
+}
+
+/**
  * Properties for creating or updating a Google Cloud Compute Engine instance.
  */
 export interface InstanceProps extends GoogleCloudClientProps {
@@ -174,13 +229,21 @@ export interface InstanceProps extends GoogleCloudClientProps {
    * @default ["https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write"]
    */
   serviceAccountScopes?: string[];
+
+  /**
+   * Additional disks to attach to the instance.
+   * These are separate from the boot disk and can be Disk resources or disk selfLink strings.
+   */
+  additionalDisks?: AttachedDiskConfig[];
 }
 
 /**
  * Resolved container configuration in the output.
  */
-export interface ResolvedContainerConfig
-  extends Omit<ContainerConfig, "image"> {
+export interface ResolvedContainerConfig extends Omit<
+  ContainerConfig,
+  "image"
+> {
   /**
    * Resolved image reference used for deployment.
    * This is the actual image URL/tag that was deployed.
@@ -191,7 +254,10 @@ export interface ResolvedContainerConfig
 /**
  * Output type for a Google Cloud Compute Engine instance.
  */
-export type Instance = Omit<InstanceProps, "keyFilename" | "container"> & {
+export type Instance = Omit<
+  InstanceProps,
+  "keyFilename" | "container" | "additionalDisks"
+> & {
   /**
    * The instance self-link URL.
    */
@@ -235,6 +301,11 @@ export type Instance = Omit<InstanceProps, "keyFilename" | "container"> & {
    * Service account scopes.
    */
   serviceAccountScopes?: string[];
+
+  /**
+   * Additional disks attached to the instance.
+   */
+  additionalDisks?: ResolvedAttachedDisk[];
 
   /**
    * Resource type identifier.
@@ -293,10 +364,14 @@ function generateContainerStartupScript(
     // Extract the registry host for docker-credential-gcr
     const registryHost = imageRef.split("/")[0];
     lines.push(`# Authenticate to Google Container Registry`);
-    lines.push(`# On COS, use docker-credential-gcr with a writable config directory`);
+    lines.push(
+      `# On COS, use docker-credential-gcr with a writable config directory`,
+    );
     lines.push(`export HOME=/home/chronos`);
     lines.push(`mkdir -p /home/chronos/.docker`);
-    lines.push(`docker-credential-gcr configure-docker --registries=${registryHost}`);
+    lines.push(
+      `docker-credential-gcr configure-docker --registries=${registryHost}`,
+    );
     lines.push("");
   }
 
@@ -449,6 +524,30 @@ function resolveImageRef(container: ContainerConfig): string {
  *   machineType: "e2-small",
  * });
  * ```
+ *
+ * @example
+ * ## Create a VM with additional disks
+ *
+ * Attaches additional persistent disks for data storage.
+ *
+ * ```ts
+ * import { Disk, Instance } from "alchemy/google-cloud";
+ *
+ * const dataDisk = await Disk("data", {
+ *   zone: "us-central1-a",
+ *   sizeGb: 200,
+ *   diskType: "pd-balanced",
+ * });
+ *
+ * const vm = await Instance("server", {
+ *   zone: "us-central1-a",
+ *   machineType: "e2-medium",
+ *   additionalDisks: [{
+ *     disk: dataDisk,
+ *     deviceName: "data-disk",
+ *   }],
+ * });
+ * ```
  */
 export const Instance = Resource(
   "google-cloud::Instance",
@@ -505,10 +604,25 @@ export const Instance = Resource(
       );
     }
 
+    // Resolve additional disk references
+    const resolvedAdditionalDisks: ResolvedAttachedDisk[] = [];
+    if (props.additionalDisks) {
+      for (const diskConfig of props.additionalDisks) {
+        const diskSelfLink = isDisk(diskConfig.disk)
+          ? diskConfig.disk.selfLink
+          : diskConfig.disk;
+        resolvedAdditionalDisks.push({
+          diskSelfLink,
+          deviceName: diskConfig.deviceName,
+          mode: diskConfig.mode ?? "READ_WRITE",
+          autoDelete: diskConfig.autoDelete ?? false,
+        });
+      }
+    }
+
     // Import the compute client dynamically to handle optional peer dependency
-    const { InstancesClient, ZoneOperationsClient } = await import(
-      "@google-cloud/compute"
-    );
+    const { InstancesClient, ZoneOperationsClient } =
+      await import("@google-cloud/compute");
 
     // Create clients with resolved credentials
     const clientOptions: { projectId?: string; keyFilename?: string } = {};
@@ -589,21 +703,35 @@ export const Instance = Resource(
       }
     }
 
+    // Build the disks array: boot disk + additional disks
+    const disks: protos.google.cloud.compute.v1.IAttachedDisk[] = [
+      {
+        boot: true,
+        autoDelete: true,
+        initializeParams: {
+          sourceImage,
+          diskSizeGb: diskSizeGb.toString(),
+          diskType: `zones/${zone}/diskTypes/${diskType}`,
+        },
+      },
+    ];
+
+    // Add additional disks
+    for (const resolvedDisk of resolvedAdditionalDisks) {
+      disks.push({
+        boot: false,
+        autoDelete: resolvedDisk.autoDelete,
+        source: resolvedDisk.diskSelfLink,
+        deviceName: resolvedDisk.deviceName,
+        mode: resolvedDisk.mode,
+      });
+    }
+
     // Build the instance resource
     const instanceResource: protos.google.cloud.compute.v1.IInstance = {
       name,
       machineType: `zones/${zone}/machineTypes/${machineType}`,
-      disks: [
-        {
-          boot: true,
-          autoDelete: true,
-          initializeParams: {
-            sourceImage,
-            diskSizeGb: diskSizeGb.toString(),
-            diskType: `zones/${zone}/diskTypes/${diskType}`,
-          },
-        },
-      ],
+      disks,
       networkInterfaces: [
         {
           network: `global/networks/${network}`,
@@ -779,6 +907,10 @@ export const Instance = Resource(
       tags: props.tags,
       container: resolvedContainer,
       serviceAccountScopes: props.serviceAccountScopes,
+      additionalDisks:
+        resolvedAdditionalDisks.length > 0
+          ? resolvedAdditionalDisks
+          : undefined,
       selfLink: instance.selfLink || "",
       status: (instance.status as Instance["status"]) || "RUNNING",
       internalIp,

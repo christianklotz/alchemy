@@ -1,3 +1,4 @@
+import { ArtifactRegistryClient } from "@google-cloud/artifact-registry";
 import { describe, expect } from "vitest";
 import { alchemy } from "../../src/alchemy.ts";
 import { destroy } from "../../src/destroy.ts";
@@ -71,8 +72,6 @@ describe.skipIf(!process.env.ALL_TESTS)(
 );
 
 async function assertRepositoryDeleted(registry: ArtifactRegistry) {
-  const { ArtifactRegistryClient } =
-    await import("@google-cloud/artifact-registry");
   const client = new ArtifactRegistryClient();
 
   try {
