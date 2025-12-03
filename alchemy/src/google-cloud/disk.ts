@@ -69,6 +69,12 @@ export interface DiskProps extends GoogleCloudClientProps {
    * @default false
    */
   delete?: boolean;
+
+  /**
+   * Whether to adopt an existing disk if it already exists.
+   * @default false
+   */
+  adopt?: boolean;
 }
 
 /**
@@ -405,31 +411,52 @@ export const Disk = Resource(
         diskResource.sourceSnapshot = props.sourceSnapshot;
       }
 
-      const [operation] = await disksClient.insert({
-        project,
-        zone,
-        diskResource,
-      });
-
-      // Wait for operation to complete
-      if (operation.name) {
-        await waitForZoneOperation(
-          operationsClient,
+      try {
+        const [operation] = await disksClient.insert({
           project,
           zone,
-          operation.name,
-        );
+          diskResource,
+        });
+
+        // Wait for operation to complete
+        if (operation.name) {
+          await waitForZoneOperation(
+            operationsClient,
+            project,
+            zone,
+            operation.name,
+          );
+        }
+
+        // Get the created disk details
+        const [createdDisk] = await disksClient.get({
+          project,
+          zone,
+          disk: name,
+        });
+        disk = createdDisk;
+
+        logger.log(`  Disk ${name} created`);
+      } catch (error: unknown) {
+        if (isAlreadyExistsError(error)) {
+          const adopt = props.adopt ?? this.scope.adopt;
+          if (!adopt) {
+            throw new Error(
+              `Disk "${name}" already exists. Use adopt: true to adopt it.`,
+              { cause: error },
+            );
+          }
+          logger.log(`  Disk ${name} already exists, adopting`);
+          const [existing] = await disksClient.get({
+            project,
+            zone,
+            disk: name,
+          });
+          disk = existing;
+        } else {
+          throw error;
+        }
       }
-
-      // Get the created disk details
-      const [createdDisk] = await disksClient.get({
-        project,
-        zone,
-        disk: name,
-      });
-      disk = createdDisk;
-
-      logger.log(`  Disk ${name} created`);
     }
 
     return {
@@ -494,6 +521,16 @@ async function waitForZoneOperation(
 function isNotFoundError(error: unknown): boolean {
   if (error && typeof error === "object" && "code" in error) {
     return (error as { code: number }).code === 404;
+  }
+  return false;
+}
+
+/**
+ * Check if an error is a 409 Conflict (already exists) error.
+ */
+function isAlreadyExistsError(error: unknown): boolean {
+  if (error && typeof error === "object" && "code" in error) {
+    return (error as { code: number }).code === 409;
   }
   return false;
 }

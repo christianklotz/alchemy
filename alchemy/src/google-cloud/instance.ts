@@ -241,6 +241,12 @@ export interface InstanceProps extends GoogleCloudClientProps {
    * @default true
    */
   rebootOnStartupScriptChange?: boolean;
+
+  /**
+   * Whether to adopt an existing instance if it already exists.
+   * @default false
+   */
+  adopt?: boolean;
 }
 
 /**
@@ -991,31 +997,52 @@ export const Instance = Resource(
       // Create new instance
       logger.log(`Creating instance: ${name}`);
 
-      const [operation] = await instancesClient.insert({
-        project,
-        zone,
-        instanceResource,
-      });
-
-      // Wait for operation to complete
-      if (operation.name) {
-        await waitForZoneOperation(
-          operationsClient,
+      try {
+        const [operation] = await instancesClient.insert({
           project,
           zone,
-          operation.name,
-        );
+          instanceResource,
+        });
+
+        // Wait for operation to complete
+        if (operation.name) {
+          await waitForZoneOperation(
+            operationsClient,
+            project,
+            zone,
+            operation.name,
+          );
+        }
+
+        // Get the created instance details
+        const [createdInstance] = await instancesClient.get({
+          project,
+          zone,
+          instance: name,
+        });
+        instance = createdInstance;
+
+        logger.log(`  Instance ${name} created`);
+      } catch (error: unknown) {
+        if (isAlreadyExistsError(error)) {
+          const adopt = props.adopt ?? this.scope.adopt;
+          if (!adopt) {
+            throw new Error(
+              `Instance "${name}" already exists. Use adopt: true to adopt it.`,
+              { cause: error },
+            );
+          }
+          logger.log(`  Instance ${name} already exists, adopting`);
+          const [existing] = await instancesClient.get({
+            project,
+            zone,
+            instance: name,
+          });
+          instance = existing;
+        } else {
+          throw error;
+        }
       }
-
-      // Get the created instance details
-      const [createdInstance] = await instancesClient.get({
-        project,
-        zone,
-        instance: name,
-      });
-      instance = createdInstance;
-
-      logger.log(`  Instance ${name} created`);
     }
 
     // Extract IP addresses
@@ -1097,6 +1124,16 @@ async function waitForZoneOperation(
 function isNotFoundError(error: unknown): boolean {
   if (error && typeof error === "object" && "code" in error) {
     return (error as { code: number }).code === 404;
+  }
+  return false;
+}
+
+/**
+ * Check if an error is a 409 Conflict (already exists) error.
+ */
+function isAlreadyExistsError(error: unknown): boolean {
+  if (error && typeof error === "object" && "code" in error) {
+    return (error as { code: number }).code === 409;
   }
   return false;
 }
