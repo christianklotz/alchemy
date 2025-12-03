@@ -100,6 +100,12 @@ export interface FirewallRuleProps extends GoogleCloudClientProps {
    * @default false
    */
   disabled?: boolean;
+
+  /**
+   * Whether to adopt an existing firewall rule if it already exists.
+   * @default false
+   */
+  adopt?: boolean;
 }
 
 /**
@@ -352,22 +358,42 @@ export const FirewallRule = Resource(
       // Create new firewall rule
       logger.log(`Creating firewall rule: ${name}`);
 
-      const [operation] = await firewallsClient.insert({
-        project,
-        firewallResource,
-      });
+      try {
+        const [operation] = await firewallsClient.insert({
+          project,
+          firewallResource,
+        });
 
-      if (operation.name) {
-        await waitForGlobalOperation(operationsClient, project, operation.name);
+        if (operation.name) {
+          await waitForGlobalOperation(operationsClient, project, operation.name);
+        }
+
+        const [created] = await firewallsClient.get({
+          project,
+          firewall: name,
+        });
+        firewall = created;
+
+        logger.log(`  Firewall rule ${name} created`);
+      } catch (error: unknown) {
+        if (isAlreadyExistsError(error)) {
+          const adopt = props.adopt ?? this.scope.adopt;
+          if (!adopt) {
+            throw new Error(
+              `Firewall rule "${name}" already exists. Use adopt: true to adopt it.`,
+              { cause: error },
+            );
+          }
+          logger.log(`  Firewall rule ${name} already exists, adopting`);
+          const [existing] = await firewallsClient.get({
+            project,
+            firewall: name,
+          });
+          firewall = existing;
+        } else {
+          throw error;
+        }
       }
-
-      const [created] = await firewallsClient.get({
-        project,
-        firewall: name,
-      });
-      firewall = created;
-
-      logger.log(`  Firewall rule ${name} created`);
     }
 
     return {
@@ -434,6 +460,16 @@ async function waitForGlobalOperation(
 function isNotFoundError(error: unknown): boolean {
   if (error && typeof error === "object" && "code" in error) {
     return (error as { code: number }).code === 404;
+  }
+  return false;
+}
+
+/**
+ * Check if an error is a 409 Conflict (already exists) error.
+ */
+function isAlreadyExistsError(error: unknown): boolean {
+  if (error && typeof error === "object" && "code" in error) {
+    return (error as { code: number }).code === 409;
   }
   return false;
 }
