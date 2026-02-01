@@ -3,6 +3,7 @@ import { Resource, ResourceKind } from "../resource.ts";
 import { logger } from "../util/logger.ts";
 import type { GoogleCloudClientProps } from "./client-props.ts";
 import { resolveGoogleCloudCredentials } from "./credentials.ts";
+import { isAlreadyExistsError, isNotFoundError } from "./util.ts";
 
 /**
  * Repository format types supported by Artifact Registry.
@@ -67,6 +68,13 @@ export interface ArtifactRegistryProps extends GoogleCloudClientProps {
    * Cannot be changed after creation.
    */
   kmsKeyName?: string;
+
+  /**
+   * Whether to delete the repository when removed from Alchemy.
+   * Since repositories contain data (container images, packages), this defaults to false for safety.
+   * @default false
+   */
+  delete?: boolean;
 }
 
 /**
@@ -74,7 +82,7 @@ export interface ArtifactRegistryProps extends GoogleCloudClientProps {
  */
 export type ArtifactRegistry = Omit<
   ArtifactRegistryProps,
-  "keyFilename" | "format"
+  "keyFilename" | "format" | "adopt" | "delete"
 > & {
   /**
    * The repository name.
@@ -210,10 +218,35 @@ export const ArtifactRegistry = Resource(
     const location = props.location;
     const format = props.format ?? "docker";
 
+    // Local development mode - return mock data
+    if (this.scope.local) {
+      const host =
+        format === "docker"
+          ? `${location}-docker.pkg.dev/${project}/${name}`
+          : `${location}-${format}.pkg.dev/${project}/${name}`;
+
+      return {
+        name,
+        location,
+        project,
+        format,
+        description: props.description,
+        labels: props.labels,
+        immutableTags: props.immutableTags,
+        kmsKeyName: props.kmsKeyName,
+        resourceName:
+          this.output?.resourceName ??
+          `projects/${project}/locations/${location}/repositories/${name}`,
+        host,
+        createTime: this.output?.createTime ?? new Date().toISOString(),
+        updateTime: new Date().toISOString(),
+        type: "google-cloud-artifact-registry",
+      };
+    }
+
     // Import the Artifact Registry client dynamically
-    const { ArtifactRegistryClient } = await import(
-      "@google-cloud/artifact-registry"
-    );
+    const { ArtifactRegistryClient } =
+      await import("@google-cloud/artifact-registry");
 
     // Create client with resolved credentials
     const clientOptions: { projectId?: string; keyFilename?: string } = {};
@@ -230,7 +263,9 @@ export const ArtifactRegistry = Resource(
     const parent = `projects/${project}/locations/${location}`;
 
     if (this.phase === "delete") {
-      if (this.output?.name) {
+      // Only delete if explicitly requested (data resource safety pattern)
+      // Default is false to protect container images and packages
+      if (props.delete === true && this.output?.name) {
         logger.log(`Deleting repository: ${this.output.name}`);
 
         try {
@@ -247,6 +282,10 @@ export const ArtifactRegistry = Resource(
             throw error;
           }
         }
+      } else if (props.delete !== true) {
+        logger.log(
+          `Skipping deletion of repository ${this.output?.name} (delete: false, preserving data)`,
+        );
       }
       return this.destroy();
     }
@@ -437,26 +476,6 @@ function timestampToISOString(
         ? (timestamp.seconds as Long).toNumber()
         : (timestamp.seconds as number);
   return new Date(seconds * 1000).toISOString();
-}
-
-/**
- * Check if an error is a 404 Not Found error.
- */
-function isNotFoundError(error: unknown): boolean {
-  if (error && typeof error === "object" && "code" in error) {
-    return (error as { code: number }).code === 5; // gRPC NOT_FOUND
-  }
-  return false;
-}
-
-/**
- * Check if an error is an ALREADY_EXISTS error.
- */
-function isAlreadyExistsError(error: unknown): boolean {
-  if (error && typeof error === "object" && "code" in error) {
-    return (error as { code: number }).code === 6; // gRPC ALREADY_EXISTS
-  }
-  return false;
 }
 
 /**

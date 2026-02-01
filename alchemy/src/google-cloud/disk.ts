@@ -3,6 +3,11 @@ import { Resource, ResourceKind } from "../resource.ts";
 import { logger } from "../util/logger.ts";
 import type { GoogleCloudClientProps } from "./client-props.ts";
 import { resolveGoogleCloudCredentials } from "./credentials.ts";
+import {
+  isAlreadyExistsError,
+  isNotFoundError,
+  waitForZoneOperation,
+} from "./util.ts";
 
 /**
  * Persistent disk type.
@@ -80,7 +85,7 @@ export interface DiskProps extends GoogleCloudClientProps {
 /**
  * Output type for a Google Cloud Persistent Disk.
  */
-export type Disk = Omit<DiskProps, "keyFilename" | "delete"> & {
+export type Disk = Omit<DiskProps, "keyFilename" | "delete" | "adopt"> & {
   /**
    * The disk self-link URL.
    */
@@ -228,10 +233,29 @@ export const Disk = Resource(
       throw new Error("sourceImage and sourceSnapshot are mutually exclusive");
     }
 
+    // Local development mode - return mock data
+    if (this.scope.local) {
+      return {
+        name,
+        zone,
+        project,
+        sizeGb,
+        diskType,
+        sourceImage: props.sourceImage,
+        sourceSnapshot: props.sourceSnapshot,
+        labels: props.labels,
+        selfLink:
+          this.output?.selfLink ??
+          `https://www.googleapis.com/compute/v1/projects/${project}/zones/${zone}/disks/${name}`,
+        status: "READY",
+        createdAt: this.output?.createdAt ?? new Date().toISOString(),
+        type: "google-cloud-disk",
+      };
+    }
+
     // Import the compute client dynamically to handle optional peer dependency
-    const { DisksClient, ZoneOperationsClient } = await import(
-      "@google-cloud/compute"
-    );
+    const { DisksClient, ZoneOperationsClient } =
+      await import("@google-cloud/compute");
 
     // Create clients with resolved credentials
     const clientOptions: { projectId?: string; keyFilename?: string } = {};
@@ -247,7 +271,8 @@ export const Disk = Resource(
 
     if (this.phase === "delete") {
       // Only delete if explicitly requested (data resource safety pattern)
-      if (props.delete !== false && this.output?.name) {
+      // Default is false to protect data on disks
+      if (props.delete === true && this.output?.name) {
         logger.log(`Deleting disk: ${this.output.name}`);
 
         try {
@@ -276,9 +301,9 @@ export const Disk = Resource(
             throw error;
           }
         }
-      } else if (props.delete === false) {
+      } else if (props.delete !== true) {
         logger.log(
-          `Skipping deletion of disk ${this.output?.name} (delete: false)`,
+          `Skipping deletion of disk ${this.output?.name} (delete: false, preserving data)`,
         );
       }
       return this.destroy();
@@ -475,62 +500,3 @@ export const Disk = Resource(
     };
   },
 );
-
-/**
- * Wait for a zone operation to complete.
- */
-async function waitForZoneOperation(
-  operationsClient: InstanceType<
-    typeof import("@google-cloud/compute").ZoneOperationsClient
-  >,
-  project: string,
-  zone: string,
-  operationName: string,
-): Promise<void> {
-  const maxAttempts = 60;
-  const delayMs = 5000;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const [operation] = await operationsClient.get({
-      project,
-      zone,
-      operation: operationName,
-    });
-
-    if (operation.status === "DONE") {
-      if (operation.error?.errors?.length) {
-        const errors = operation.error.errors
-          .map((e) => `${e.code}: ${e.message}`)
-          .join(", ");
-        throw new Error(`Operation failed: ${errors}`);
-      }
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-
-  throw new Error(
-    `Operation ${operationName} timed out after ${maxAttempts * delayMs}ms`,
-  );
-}
-
-/**
- * Check if an error is a 404 Not Found error.
- */
-function isNotFoundError(error: unknown): boolean {
-  if (error && typeof error === "object" && "code" in error) {
-    return (error as { code: number }).code === 404;
-  }
-  return false;
-}
-
-/**
- * Check if an error is a 409 Conflict (already exists) error.
- */
-function isAlreadyExistsError(error: unknown): boolean {
-  if (error && typeof error === "object" && "code" in error) {
-    return (error as { code: number }).code === 409;
-  }
-  return false;
-}

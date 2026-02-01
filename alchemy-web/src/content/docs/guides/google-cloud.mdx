@@ -1,0 +1,237 @@
+---
+title: Google Cloud
+description: Deploy a containerized application to Google Cloud using Alchemy
+sidebar:
+  order: 20
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide shows how to deploy a containerized application to a Google Cloud VM using Alchemy.
+
+## Prerequisites
+
+- A Google Cloud account with billing enabled
+- A GCP project with Compute Engine API enabled
+- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) installed
+
+## Install Dependencies
+
+<Tabs syncKey="pkgManager">
+  <TabItem label="bun">
+    ```sh
+    bun add alchemy @google-cloud/compute @google-cloud/artifact-registry
+    ```
+  </TabItem>
+  <TabItem label="npm">
+    ```sh
+    npm install alchemy @google-cloud/compute @google-cloud/artifact-registry
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm add alchemy @google-cloud/compute @google-cloud/artifact-registry
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn add alchemy @google-cloud/compute @google-cloud/artifact-registry
+    ```
+  </TabItem>
+</Tabs>
+
+## Credentials
+
+### Option 1: Application Default Credentials (Local Development)
+
+```sh
+gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
+```
+
+### Option 2: Service Account Key (CI/CD)
+
+1. Create a service account in the GCP Console
+2. Grant it the "Compute Admin" and "Artifact Registry Admin" roles
+3. Download the JSON key file
+4. Set environment variables:
+
+```sh
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
+export GOOGLE_CLOUD_PROJECT="your-project-id"
+```
+
+## Create a Simple Application
+
+Create a simple Go web server:
+
+```go title="main.go"
+package main
+
+import (
+    "fmt"
+    "net/http"
+)
+
+func main() {
+    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        fmt.Fprintf(w, "Hello from Google Cloud!")
+    })
+    http.ListenAndServe(":8080", nil)
+}
+```
+
+```dockerfile title="Dockerfile"
+FROM golang:1.21-alpine AS builder
+WORKDIR /app
+COPY main.go .
+RUN go build -o server main.go
+
+FROM alpine:latest
+WORKDIR /app
+COPY --from=builder /app/server .
+EXPOSE 8080
+CMD ["./server"]
+```
+
+## Create `alchemy.run.ts`
+
+```typescript title="alchemy.run.ts"
+import alchemy from "alchemy";
+import { Image } from "alchemy/docker";
+import { ArtifactRegistry, FirewallRule, Instance } from "alchemy/google-cloud";
+import fs from "node:fs/promises";
+
+const app = await alchemy("google-cloud-app");
+
+// Configuration
+const zone = process.env.GOOGLE_CLOUD_ZONE ?? "us-central1-a";
+const region = zone.split("-").slice(0, 2).join("-");
+
+// Read service account credentials for Docker registry auth
+const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+if (!credentialsPath) {
+  throw new Error("GOOGLE_APPLICATION_CREDENTIALS is required");
+}
+const credentials = await fs.readFile(credentialsPath, "utf-8");
+
+// Create Artifact Registry for container images
+const registry = await ArtifactRegistry("images", {
+  location: region,
+  format: "docker",
+  adopt: true,
+});
+
+// Build and push the container image
+const image = await Image("app-image", {
+  name: `${registry.host}/hello-server`,
+  tag: "latest",
+  build: {
+    context: import.meta.dirname,
+    dockerfile: "Dockerfile",
+    platform: "linux/amd64",
+  },
+  registry: {
+    server: `${region}-docker.pkg.dev`,
+    username: "_json_key",
+    password: alchemy.secret(credentials),
+  },
+});
+
+// Create firewall rule to allow HTTP traffic
+await FirewallRule("allow-http", {
+  direction: "INGRESS",
+  sourceRanges: ["0.0.0.0/0"],
+  targetTags: ["http-server"],
+  allowed: [{ protocol: "tcp", ports: ["80"] }],
+});
+
+// Deploy the container to a VM
+const vm = await Instance("hello-server", {
+  zone,
+  machineType: "e2-micro",
+  tags: ["http-server"],
+  container: {
+    image,
+    ports: [{ hostPort: 80, containerPort: 8080 }],
+  },
+});
+
+console.log(`VM External IP: ${vm.externalIp}`);
+console.log(`URL: http://${vm.externalIp}/`);
+
+await app.finalize();
+```
+
+## Deploy
+
+Run the deployment script:
+
+<Tabs syncKey="pkgManager">
+  <TabItem label="bun">
+    ```sh
+    bun ./alchemy.run.ts
+    ```
+  </TabItem>
+  <TabItem label="npm">
+    ```sh
+    npx tsx ./alchemy.run.ts
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm tsx ./alchemy.run.ts
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn tsx ./alchemy.run.ts
+    ```
+  </TabItem>
+</Tabs>
+
+It should output the VM's external IP:
+
+```sh
+VM External IP: 34.123.45.67
+URL: http://34.123.45.67/
+```
+
+Visit the URL to see your application running!
+
+## Tear Down
+
+Clean up all resources:
+
+<Tabs syncKey="pkgManager">
+  <TabItem label="bun">
+    ```sh
+    bun ./alchemy.run.ts --destroy
+    ```
+  </TabItem>
+  <TabItem label="npm">
+    ```sh
+    npx tsx ./alchemy.run.ts --destroy
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm tsx ./alchemy.run.ts --destroy
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn tsx ./alchemy.run.ts --destroy
+    ```
+  </TabItem>
+</Tabs>
+
+:::note
+By default, the Artifact Registry is preserved to protect your container images. Add `delete: true` to the ArtifactRegistry props to delete it during teardown.
+:::
+
+## Next Steps
+
+- Add a [Disk](/providers/google-cloud/disk) for persistent storage
+- Configure [FirewallRule](/providers/google-cloud/firewall-rule) for HTTPS
+- Use scope-level credentials for multi-environment deployments

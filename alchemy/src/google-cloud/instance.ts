@@ -7,6 +7,11 @@ import type { GoogleCloudClientProps } from "./client-props.ts";
 import { resolveGoogleCloudCredentials } from "./credentials.ts";
 import type { Disk } from "./disk.ts";
 import { isDisk } from "./disk.ts";
+import {
+  isAlreadyExistsError,
+  isNotFoundError,
+  waitForZoneOperation,
+} from "./util.ts";
 
 /**
  * Port mapping for container configuration.
@@ -252,8 +257,10 @@ export interface InstanceProps extends GoogleCloudClientProps {
 /**
  * Resolved container configuration in the output.
  */
-export interface ResolvedContainerConfig
-  extends Omit<ContainerConfig, "image"> {
+export interface ResolvedContainerConfig extends Omit<
+  ContainerConfig,
+  "image"
+> {
   /**
    * Resolved image reference used for deployment.
    * This is the actual image URL/tag that was deployed.
@@ -266,7 +273,7 @@ export interface ResolvedContainerConfig
  */
 export type Instance = Omit<
   InstanceProps,
-  "keyFilename" | "container" | "additionalDisks"
+  "keyFilename" | "container" | "additionalDisks" | "adopt"
 > & {
   /**
    * The instance self-link URL.
@@ -630,10 +637,43 @@ export const Instance = Resource(
       }
     }
 
+    // Local development mode - return mock data
+    if (this.scope.local) {
+      return {
+        name,
+        zone,
+        project,
+        machineType,
+        sourceImage,
+        diskSizeGb,
+        diskType,
+        network,
+        assignExternalIp,
+        startupScript: props.container ? undefined : props.startupScript,
+        labels: props.labels,
+        tags: props.tags,
+        container: resolvedContainer,
+        serviceAccountScopes: props.serviceAccountScopes,
+        additionalDisks:
+          resolvedAdditionalDisks.length > 0
+            ? resolvedAdditionalDisks
+            : undefined,
+        selfLink:
+          this.output?.selfLink ??
+          `https://www.googleapis.com/compute/v1/projects/${project}/zones/${zone}/instances/${name}`,
+        status: "RUNNING",
+        internalIp: this.output?.internalIp ?? "10.128.0.2",
+        externalIp: assignExternalIp
+          ? (this.output?.externalIp ?? "34.123.45.67")
+          : undefined,
+        createdAt: this.output?.createdAt ?? new Date().toISOString(),
+        type: "google-cloud-instance",
+      };
+    }
+
     // Import the compute client dynamically to handle optional peer dependency
-    const { InstancesClient, ZoneOperationsClient } = await import(
-      "@google-cloud/compute"
-    );
+    const { InstancesClient, ZoneOperationsClient } =
+      await import("@google-cloud/compute");
 
     // Create clients with resolved credentials
     const clientOptions: { projectId?: string; keyFilename?: string } = {};
@@ -1078,62 +1118,3 @@ export const Instance = Resource(
     };
   },
 );
-
-/**
- * Wait for a zone operation to complete.
- */
-async function waitForZoneOperation(
-  operationsClient: InstanceType<
-    typeof import("@google-cloud/compute").ZoneOperationsClient
-  >,
-  project: string,
-  zone: string,
-  operationName: string,
-): Promise<void> {
-  const maxAttempts = 60;
-  const delayMs = 5000;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const [operation] = await operationsClient.get({
-      project,
-      zone,
-      operation: operationName,
-    });
-
-    if (operation.status === "DONE") {
-      if (operation.error?.errors?.length) {
-        const errors = operation.error.errors
-          .map((e) => `${e.code}: ${e.message}`)
-          .join(", ");
-        throw new Error(`Operation failed: ${errors}`);
-      }
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-
-  throw new Error(
-    `Operation ${operationName} timed out after ${maxAttempts * delayMs}ms`,
-  );
-}
-
-/**
- * Check if an error is a 404 Not Found error.
- */
-function isNotFoundError(error: unknown): boolean {
-  if (error && typeof error === "object" && "code" in error) {
-    return (error as { code: number }).code === 404;
-  }
-  return false;
-}
-
-/**
- * Check if an error is a 409 Conflict (already exists) error.
- */
-function isAlreadyExistsError(error: unknown): boolean {
-  if (error && typeof error === "object" && "code" in error) {
-    return (error as { code: number }).code === 409;
-  }
-  return false;
-}

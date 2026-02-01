@@ -4,6 +4,11 @@ import { Resource, ResourceKind } from "../resource.ts";
 import { logger } from "../util/logger.ts";
 import type { GoogleCloudClientProps } from "./client-props.ts";
 import { resolveGoogleCloudCredentials } from "./credentials.ts";
+import {
+  isAlreadyExistsError,
+  isNotFoundError,
+  waitForGlobalOperation,
+} from "./util.ts";
 
 /**
  * Firewall rule direction.
@@ -111,7 +116,7 @@ export interface FirewallRuleProps extends GoogleCloudClientProps {
 /**
  * Output type for a Google Cloud firewall rule.
  */
-export type FirewallRule = Omit<FirewallRuleProps, "keyFilename"> & {
+export type FirewallRule = Omit<FirewallRuleProps, "keyFilename" | "adopt"> & {
   /**
    * The firewall rule name.
    */
@@ -222,10 +227,33 @@ export const FirewallRule = Resource(
     const direction = props.direction ?? "INGRESS";
     const priority = props.priority ?? 1000;
 
+    // Local development mode - return mock data
+    if (this.scope.local) {
+      return {
+        name,
+        project,
+        network,
+        direction,
+        priority,
+        sourceRanges: props.sourceRanges,
+        destinationRanges: props.destinationRanges,
+        sourceTags: props.sourceTags,
+        targetTags: props.targetTags,
+        allowed: props.allowed,
+        denied: props.denied,
+        description: props.description,
+        disabled: props.disabled,
+        selfLink:
+          this.output?.selfLink ??
+          `https://www.googleapis.com/compute/v1/projects/${project}/global/firewalls/${name}`,
+        createdAt: this.output?.createdAt ?? new Date().toISOString(),
+        type: "google-cloud-firewall-rule",
+      };
+    }
+
     // Import the compute client dynamically
-    const { FirewallsClient, GlobalOperationsClient } = await import(
-      "@google-cloud/compute"
-    );
+    const { FirewallsClient, GlobalOperationsClient } =
+      await import("@google-cloud/compute");
 
     // Create clients with resolved credentials
     const clientOptions: { projectId?: string; keyFilename?: string } = {};
@@ -365,7 +393,11 @@ export const FirewallRule = Resource(
         });
 
         if (operation.name) {
-          await waitForGlobalOperation(operationsClient, project, operation.name);
+          await waitForGlobalOperation(
+            operationsClient,
+            project,
+            operation.name,
+          );
         }
 
         const [created] = await firewallsClient.get({
@@ -416,60 +448,3 @@ export const FirewallRule = Resource(
     };
   },
 );
-
-/**
- * Wait for a global operation to complete.
- */
-async function waitForGlobalOperation(
-  operationsClient: InstanceType<
-    typeof import("@google-cloud/compute").GlobalOperationsClient
-  >,
-  project: string,
-  operationName: string,
-): Promise<void> {
-  const maxAttempts = 60;
-  const delayMs = 2000;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const [operation] = await operationsClient.get({
-      project,
-      operation: operationName,
-    });
-
-    if (operation.status === "DONE") {
-      if (operation.error?.errors?.length) {
-        const errors = operation.error.errors
-          .map((e) => `${e.code}: ${e.message}`)
-          .join(", ");
-        throw new Error(`Operation failed: ${errors}`);
-      }
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-
-  throw new Error(
-    `Operation ${operationName} timed out after ${maxAttempts * delayMs}ms`,
-  );
-}
-
-/**
- * Check if an error is a 404 Not Found error.
- */
-function isNotFoundError(error: unknown): boolean {
-  if (error && typeof error === "object" && "code" in error) {
-    return (error as { code: number }).code === 404;
-  }
-  return false;
-}
-
-/**
- * Check if an error is a 409 Conflict (already exists) error.
- */
-function isAlreadyExistsError(error: unknown): boolean {
-  if (error && typeof error === "object" && "code" in error) {
-    return (error as { code: number }).code === 409;
-  }
-  return false;
-}
