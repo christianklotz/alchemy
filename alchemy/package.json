@@ -123,6 +123,10 @@
       "bun": "./src/github/index.ts",
       "import": "./lib/github/index.js"
     },
+    "./google-cloud": {
+      "bun": "./src/google-cloud/index.ts",
+      "import": "./lib/google-cloud/index.js"
+    },
     "./neon": {
       "bun": "./src/neon/index.ts",
       "import": "./lib/neon/index.js"
@@ -219,6 +223,8 @@
     "@aws-sdk/client-sts": "^3.0.0",
     "@cloudflare/vite-plugin": "catalog:",
     "@coinbase/cdp-sdk": "^0.10.0",
+    "@google-cloud/artifact-registry": "^4.3.1",
+    "@google-cloud/compute": "^6.4.0",
     "@libsql/client": "^0.15.12",
     "@opennextjs/cloudflare": "^1.6.5",
     "astro": "^5.13.2",
@@ -278,6 +284,12 @@
     },
     "vite": {
       "optional": true
+    },
+    "@google-cloud/artifact-registry": {
+      "optional": true
+    },
+    "@google-cloud/compute": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -296,6 +308,8 @@
     "@cloudflare/puppeteer": "^1.0.2",
     "@cloudflare/vite-plugin": "catalog:",
     "@coinbase/cdp-sdk": "^1.38.2",
+    "@google-cloud/artifact-registry": "^4.3.1",
+    "@google-cloud/compute": "^6.4.0",
     "@libsql/client": "^0.15.12",
     "@octokit/rest": "^21.1.1",
     "@sentry/cloudflare": "^9.43.0",
