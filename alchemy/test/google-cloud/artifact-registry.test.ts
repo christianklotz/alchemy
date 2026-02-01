@@ -32,6 +32,8 @@ describe.skipIf(!process.env.ALL_TESTS)(
           labels: {
             environment: "test",
           },
+          adopt: true, // Adopt if exists from previous test run
+          delete: true, // Enable deletion for test cleanup
         });
 
         expect(registry.name).toEqual(testId);
@@ -52,6 +54,8 @@ describe.skipIf(!process.env.ALL_TESTS)(
             environment: "test",
             updated: "true",
           },
+          adopt: true, // Adopt if exists from previous test run
+          delete: true, // Enable deletion for test cleanup
         });
 
         expect(registry.description).toEqual("Updated test repository");
