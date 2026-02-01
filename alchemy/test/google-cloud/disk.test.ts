@@ -35,6 +35,8 @@ describe.skipIf(!process.env.ALL_TESTS)("Google Cloud Disk", () => {
           zone,
           sizeGb: 10,
           diskType: "pd-standard",
+          adopt: true, // Adopt if exists from previous test run
+          delete: true, // Enable deletion for test cleanup
         });
 
         expect(disk.name).toBe(diskName);
@@ -45,6 +47,7 @@ describe.skipIf(!process.env.ALL_TESTS)("Google Cloud Disk", () => {
           name: instanceName,
           zone,
           machineType: "e2-micro",
+          adopt: true, // Adopt if exists from previous test run
           additionalDisks: [
             {
               disk: disk, // Disk resource, not string

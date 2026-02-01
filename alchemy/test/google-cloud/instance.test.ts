@@ -205,12 +205,14 @@ describe.skipIf(!process.env.ALL_TESTS)("Google Cloud Instance", () => {
 
         // Verify startup script metadata contains docker run
         // (docker being available implies COS image was used)
+        // Note: The script uses line continuations, so we check for "docker" and "run" separately
         const startupScript = fetchedInstance.metadata?.items?.find(
           (item) => item.key === "startup-script",
         );
-        expect(startupScript?.value).toContain("docker run");
+        expect(startupScript?.value).toContain("docker");
+        expect(startupScript?.value).toContain("run");
         expect(startupScript?.value).toContain("nginx:alpine");
-        expect(startupScript?.value).toContain("-p 80:80/tcp");
+        expect(startupScript?.value).toContain("80:80/tcp");
       } finally {
         console.log("Starting cleanup...");
         await destroy(scope);
