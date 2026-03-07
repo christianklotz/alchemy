@@ -1,0 +1,19 @@
+{
+  "name": "google-cloud-container",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "deploy": "alchemy deploy --env-file ../../.env",
+    "destroy": "alchemy destroy --env-file ../../.env",
+    "dev": "alchemy dev --env-file ../../.env"
+  },
+  "devDependencies": {
+    "@google-cloud/artifact-registry": "^4.3.1",
+    "@google-cloud/compute": "^6.4.0",
+    "@types/node": "^24.0.1",
+    "alchemy": "workspace:*",
+    "typescript": "catalog:"
+  }
+}

@@ -743,8 +743,12 @@ describe("Worker Resource", () => {
       expect(worker.assets?.run_worker_first).toEqual(false);
 
       // Test that the static assets are accessible
-      const indexResponse = await fetchAndExpectOK(`${worker.url}/index.html`);
-      expect(await indexResponse.text()).toContain("Assets Config Test");
+      // const indexResponse = await fetchAndExpectOK(`${worker.url}/index.html`);
+      const indexResponse = await waitFor(
+        async () => await fetchAndExpectOK(`${worker.url}/index.html`),
+        async (response) =>
+          (await response.text()).includes("Assets Config Test"),
+      );
 
       // Test HTML headers
       expect(indexResponse.headers.get("ABC")).toEqual("456");
@@ -1985,6 +1989,7 @@ describe("Worker Resource", () => {
     const newWorkerName = `${BRANCH_PREFIX}-test-worker-rename-2`;
     try {
       await Worker("rename-worker", {
+        adopt: true,
         name: originalWorkerName,
         script: `
 				export default {
@@ -2484,6 +2489,49 @@ describe("Worker Resource", () => {
       });
 
       // Verify the limits were disabled (undefined)
+      expect(worker.limits).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("create worker with subrequests limit", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-subrequests`;
+
+    let worker: Worker | undefined;
+    try {
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello subrequests!', { status: 200 });
+            }
+          };
+        `,
+        limits: {
+          subrequests: 50_000,
+        },
+      });
+
+      expect(worker.limits).toEqual({
+        subrequests: 50_000,
+      });
+
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello!', { status: 200 });
+            }
+          };
+        `,
+      });
+
       expect(worker.limits).toBeUndefined();
     } finally {
       await destroy(scope);

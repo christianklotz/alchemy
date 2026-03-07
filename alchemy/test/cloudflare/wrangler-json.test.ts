@@ -382,6 +382,51 @@ describe("WranglerJson Resource", () => {
       }
     });
 
+    test("with workflow step limits", async (scope) => {
+      const name = `${BRANCH_PREFIX}-test-worker-wf-limits`;
+      const tempDir = path.join(".out", "alchemy-wf-limits-test");
+      const entrypoint = path.join(tempDir, "worker.ts");
+
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.mkdir(tempDir, { recursive: true });
+        await fs.writeFile(entrypoint, wfWorkerScript);
+
+        const workflow = Workflow("test-workflow-limits", {
+          className: "TestWorkflow",
+          workflowName: "test-workflow-limits",
+          limits: {
+            steps: 25000,
+          },
+        });
+
+        const worker = await Worker(name, {
+          name,
+          format: "esm",
+          entrypoint,
+          bindings: {
+            WF: workflow,
+          },
+          adopt: true,
+        });
+
+        const { spec } = await WranglerJson({ worker });
+
+        expect(spec.workflows).toHaveLength(1);
+        expect(spec.workflows?.[0]).toMatchObject({
+          name: "test-workflow-limits",
+          binding: "WF",
+          class_name: "TestWorkflow",
+          limits: {
+            steps: 25000,
+          },
+        });
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await destroy(scope);
+      }
+    });
+
     test("with cron triggers", async (scope) => {
       const name = `${BRANCH_PREFIX}-test-worker-cron-json`;
       const tempDir = path.join(".out", "alchemy-cron-json-test");
@@ -749,6 +794,75 @@ describe("WranglerJson Resource", () => {
         },
         limits: {
           cpu_ms: 60000,
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
+  test("with subrequests limit", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-subrequests-limit`;
+    const tempDir = path.join(".out", "alchemy-subrequests-limit-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          limits: {
+            subrequests: 50_000,
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        limits: {
+          cpu_ms: 30_000,
+          subrequests: 50_000,
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
+  test("with cpu_ms and subrequests limits", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-both-limits`;
+    const tempDir = path.join(".out", "alchemy-both-limits-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          limits: {
+            cpu_ms: 1_000,
+            subrequests: 10,
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        limits: {
+          cpu_ms: 1_000,
+          subrequests: 10,
         },
       });
     } finally {

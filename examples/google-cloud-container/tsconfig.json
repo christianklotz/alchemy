@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["alchemy.run.ts"],
+  "compilerOptions": {
+    "composite": true,
+    "resolveJsonModule": true,
+    "outDir": "dist"
+  },
+  "references": [{ "path": "../../alchemy/tsconfig.json" }]
+}
