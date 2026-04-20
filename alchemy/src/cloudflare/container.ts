@@ -1,8 +1,8 @@
 import type { Context } from "../context.ts";
 import { Image, type ImageProps } from "../docker/image.ts";
+import { pushImageToRegistry } from "../docker/push-image.ts";
 import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
-import { secret } from "../secret.ts";
 import {
   type CloudflareApi,
   type CloudflareApiOptions,
@@ -249,7 +249,6 @@ export async function Container<T>(
   }
 
   const api = await createCloudflareApi(props);
-  const credentials = await getContainerCredentials(api);
 
   const image = await Image(id, {
     name: `${api.accountId}/${name}`,
@@ -265,16 +264,23 @@ export async function Container<T>(
           context: process.cwd(),
         },
     image: props.image,
-    registry: {
-      server: "registry.cloudflare.com",
-      username: credentials.username || credentials.user!,
-      password: secret(credentials.password),
-    },
+    skipPush: true,
   } as ImageProps);
+
+  const credentials = await getContainerCredentials(api);
+  const pushedImage = await pushImageToRegistry(image.imageRef, {
+    server: "registry.cloudflare.com",
+    username: credentials.username || credentials.user!,
+    password: credentials.password,
+  });
 
   return {
     ...output,
-    image,
+    image: {
+      ...image,
+      imageRef: pushedImage.imageRef,
+      repoDigest: pushedImage.repoDigest,
+    },
   };
 }
 

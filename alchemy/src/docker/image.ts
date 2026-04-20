@@ -1,10 +1,10 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "pathe";
 import type { Context } from "../context.ts";
 import { Resource } from "../resource.ts";
 import type { Secret } from "../secret.ts";
 import { DockerApi } from "./api.ts";
+import { pushImageToRegistry } from "./push-image.ts";
 import type { RemoteImage } from "./remote-image.ts";
 
 /**
@@ -66,9 +66,9 @@ export interface DockerBuildOptions {
 }
 
 export interface ImageRegistry {
+  server: string;
   username: string;
   password: Secret;
-  server: string;
 }
 
 /**
@@ -285,63 +285,12 @@ export const Image = Resource(
     let repoDigest: string | undefined;
     let finalImageRef = imageRef;
     if (props.registry && !props.skipPush) {
-      const { server, username, password } = props.registry;
-
-      // Ensure the registry server does not have trailing slash
-      const registryHost = server.replace(/\/$/, "");
-
-      // Determine if the built image already includes a registry host (e.g. ghcr.io/user/repo)
-      const firstSegment = imageRef.split("/")[0];
-      const hasRegistryPrefix = firstSegment.includes(".");
-
-      // Compose the target image reference that will be pushed
-      const targetImage = hasRegistryPrefix
-        ? imageRef // already fully-qualified
-        : `${registryHost}/${imageRef}`;
-
-      try {
-        // Create a temporary directory that will act as an isolated Docker config
-        // (credentials) directory. This prevents race-conditions when multiple
-        // concurrent tests perform `docker login` / `logout` by ensuring each
-        // Image operation has its own credential store.
-        const tempConfigDir = await fs.mkdtemp(
-          path.join(os.tmpdir(), "docker-config-"),
-        );
-        const api = new DockerApi({ configDir: tempConfigDir });
-
-        // Authenticate to registry using the isolated config directory
-        await api.login(registryHost, username, password.unencrypted);
-
-        // Tag local image with fully qualified name if necessary
-        if (targetImage !== imageRef) {
-          await api.exec(["tag", imageRef, targetImage]);
-        }
-
-        // Push the image
-        const { stdout: pushOut } = await api.exec(["push", targetImage]);
-
-        // Attempt to extract the repo digest from push output
-        const digestMatch = /digest:\s+([a-z0-9]+:[a-f0-9]{64})/.exec(pushOut);
-        if (digestMatch) {
-          const digestHash = digestMatch[1];
-          // Strip tag (anything after last :) to build image@digest reference
-          const [repoWithoutTag] =
-            targetImage.split(":").length > 2
-              ? [targetImage] // unlikely but safety
-              : [targetImage.substring(0, targetImage.lastIndexOf(":"))];
-          repoDigest = `${repoWithoutTag}@${digestHash}`;
-        }
-
-        // Update the final image reference to point at the pushed image
-        finalImageRef = targetImage;
-      } finally {
-        // Clean up credentials from the isolated config
-        await api.logout(registryHost);
-      }
+      const pushedImage = await pushImageToRegistry(imageRef, props.registry);
+      finalImageRef = pushedImage.imageRef;
+      repoDigest = pushedImage.repoDigest;
     }
     return {
       kind: "Image",
-      ...props,
       tag,
       name,
       imageRef: finalImageRef,
