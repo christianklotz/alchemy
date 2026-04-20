@@ -1,6 +1,6 @@
 import type { Context } from "../context.ts";
 import { Image, type ImageProps } from "../docker/image.ts";
-import { pushImageToRegistry } from "../docker/push-image.ts";
+import { pushImageToRegistry } from "../docker/registry.ts";
 import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
 import {

@@ -4,7 +4,7 @@ import type { Context } from "../context.ts";
 import { Resource } from "../resource.ts";
 import type { Secret } from "../secret.ts";
 import { DockerApi } from "./api.ts";
-import { pushImageToRegistry } from "./push-image.ts";
+import { pushImageToRegistry } from "./registry.ts";
 import type { RemoteImage } from "./remote-image.ts";
 
 /**
