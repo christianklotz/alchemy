@@ -1,3 +1,49 @@
+## v0.93.0
+
+### &nbsp;&nbsp;&nbsp;🚀 Features
+
+- **cloudflare**: Add AI Search namespace + standalone binding support &nbsp;-&nbsp; by **Gabriel Massadas** in https://github.com/alchemy-run/alchemy/issues/1386 [<samp>(091c3)</samp>](https://github.com/alchemy-run/alchemy/commit/091c32b5)
+
+### &nbsp;&nbsp;&nbsp;🐞 Bug Fixes
+
+- **cloudflare**: Prevent Docker pull for prebuilt Container images &nbsp;-&nbsp; by **Alex Dunne** and **Amp** in https://github.com/alchemy-run/alchemy/issues/1292 [<samp>(aea5d)</samp>](https://github.com/alchemy-run/alchemy/commit/aea5db74)
+
+##### &nbsp;&nbsp;&nbsp;&nbsp;[View changes on GitHub](https://github.com/alchemy-run/alchemy/compare/v0.92.2...v0.93.0)
+
+---
+
+## v0.92.2
+
+### &nbsp;&nbsp;&nbsp;🐞 Bug Fixes
+
+- **cloudflare**: Revert miniflare version &nbsp;-&nbsp; by **John Royal** [<samp>(bc15f)</samp>](https://github.com/alchemy-run/alchemy/commit/bc15f981)
+
+##### &nbsp;&nbsp;&nbsp;&nbsp;[View changes on GitHub](https://github.com/alchemy-run/alchemy/compare/v0.92.1...v0.92.2)
+
+---
+
+## v0.92.1
+
+*No significant changes*
+
+##### &nbsp;&nbsp;&nbsp;&nbsp;[View changes on GitHub](https://github.com/alchemy-run/alchemy/compare/v0.92.0...v0.92.1)
+
+---
+
+## v0.92.0
+
+### &nbsp;&nbsp;&nbsp;🚀 Features
+
+- **cloudflare**: Send email binding support &nbsp;-&nbsp; by **Dawson** and **John Royal** in https://github.com/alchemy-run/alchemy/issues/1388 [<samp>(de51e)</samp>](https://github.com/alchemy-run/alchemy/commit/de51ea37)
+
+### &nbsp;&nbsp;&nbsp;🐞 Bug Fixes
+
+- **cloudflare**: Remove agw scopes &nbsp;-&nbsp; by **Matt** in https://github.com/alchemy-run/alchemy/issues/1387 [<samp>(5349d)</samp>](https://github.com/alchemy-run/alchemy/commit/5349deb6)
+
+##### &nbsp;&nbsp;&nbsp;&nbsp;[View changes on GitHub](https://github.com/alchemy-run/alchemy/compare/v0.91.2...v0.92.0)
+
+---
+
 ## v0.91.2
 
 *No significant changes*

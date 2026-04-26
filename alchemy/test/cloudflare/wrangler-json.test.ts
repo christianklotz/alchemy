@@ -17,6 +17,7 @@ import { BrowserRendering } from "../../src/cloudflare/browser-rendering.ts";
 import { DispatchNamespace } from "../../src/cloudflare/dispatch-namespace.ts";
 import { Images } from "../../src/cloudflare/images.ts";
 import { Queue } from "../../src/cloudflare/queue.ts";
+import { EmailSender } from "../../src/cloudflare/email-sender.ts";
 import { VectorizeIndex } from "../../src/cloudflare/vectorize-index.ts";
 import { Workflow } from "../../src/cloudflare/workflow.ts";
 import "../../src/test/vitest.ts";
@@ -29,6 +30,35 @@ const esmWorkerScript = `
   export default {
     async fetch(request, env, ctx) {
       return new Response('Hello ESM world!', { status: 200 });
+    }
+  };
+`;
+
+const sendTextEmailWorkerScript = `
+  export default {
+    async fetch(request, env) {
+      await env.EMAIL.send({
+        to: "user@example.com",
+        from: "noreply@example.com",
+        subject: "Plain text test",
+        text: "Hello from Alchemy."
+      });
+      return new Response("sent", { status: 200 });
+    }
+  };
+`;
+
+const sendHtmlEmailWorkerScript = `
+  export default {
+    async fetch(request, env) {
+      await env.EMAIL.send({
+        to: "user@example.com",
+        from: "noreply@example.com",
+        subject: "HTML test",
+        html: "<h1>Hello from Alchemy.</h1><p>This is an HTML email.</p>",
+        text: "Hello from Alchemy. This is an HTML email."
+      });
+      return new Response("sent", { status: 200 });
     }
   };
 `;
@@ -252,6 +282,105 @@ describe("WranglerJson Resource", () => {
         });
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
+        await destroy(scope);
+      }
+    });
+
+    test("with send email binding", async (scope) => {
+      const name = `${BRANCH_PREFIX}-test-worker-send-email`;
+      const tempDir = path.join(".out", "alchemy-send-email-test");
+      const entrypoint = path.join(tempDir, "worker.ts");
+
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.mkdir(tempDir, { recursive: true });
+        await fs.writeFile(entrypoint, esmWorkerScript);
+
+        const worker = await Worker(name, {
+          name,
+          format: "esm",
+          entrypoint,
+          bindings: {
+            EMAIL: EmailSender({
+              allowedSenderAddresses: ["noreply@example.com"],
+              dev: { remote: true },
+            }),
+          },
+          adopt: true,
+        });
+
+        const { spec } = await WranglerJson({ worker });
+
+        expect(spec).toMatchObject({
+          name,
+          send_email: [
+            {
+              name: "EMAIL",
+              allowed_sender_addresses: ["noreply@example.com"],
+              remote: true,
+            },
+          ],
+        });
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await destroy(scope);
+      }
+    });
+
+    test("with send email binding for plain text and html payloads", async (scope) => {
+      const cases = [
+        {
+          name: `${BRANCH_PREFIX}-test-worker-send-email-text`,
+          tempDir: path.join(".out", "alchemy-send-email-text-test"),
+          script: sendTextEmailWorkerScript,
+        },
+        {
+          name: `${BRANCH_PREFIX}-test-worker-send-email-html`,
+          tempDir: path.join(".out", "alchemy-send-email-html-test"),
+          script: sendHtmlEmailWorkerScript,
+        },
+      ];
+
+      try {
+        for (const testCase of cases) {
+          await fs.rm(testCase.tempDir, { recursive: true, force: true });
+          await fs.mkdir(testCase.tempDir, { recursive: true });
+
+          const entrypoint = path.join(testCase.tempDir, "worker.ts");
+          await fs.writeFile(entrypoint, testCase.script);
+
+          const worker = await Worker(testCase.name, {
+            name: testCase.name,
+            format: "esm",
+            entrypoint,
+            bindings: {
+              EMAIL: EmailSender({
+                allowedSenderAddresses: ["noreply@example.com"],
+                dev: { remote: true },
+              }),
+            },
+            adopt: true,
+          });
+
+          const { spec } = await WranglerJson({ worker });
+
+          expect(spec).toMatchObject({
+            name: testCase.name,
+            send_email: [
+              {
+                name: "EMAIL",
+                allowed_sender_addresses: ["noreply@example.com"],
+                remote: true,
+              },
+            ],
+          });
+        }
+      } finally {
+        await Promise.all(
+          cases.map(async (testCase) => {
+            await fs.rm(testCase.tempDir, { recursive: true, force: true });
+          }),
+        );
         await destroy(scope);
       }
     });

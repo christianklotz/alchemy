@@ -4,6 +4,8 @@ import { assertNever } from "../../util/assert-never.ts";
 import { reservePort } from "../../util/find-open-port.ts";
 import type { HTTPServer } from "../../util/http.ts";
 import { logger } from "../../util/logger.ts";
+import { isAiSearchNamespace } from "../ai-search-namespace.ts";
+import { isAiSearch } from "../ai-search.ts";
 import type { CloudflareApi } from "../api.ts";
 import type {
   Binding,
@@ -50,7 +52,16 @@ type RemoteBinding =
       }
     > & { raw: true })
   // Fetcher type bindings do not require the `raw` flag and will throw an error if it is present.
-  | Extract<WorkerBindingSpec, { type: "service" | "vpc_service" }>;
+  | Extract<
+      WorkerBindingSpec,
+      { type: "send_email" | "service" | "vpc_service" }
+    >
+  // AI Search bindings reject the `raw` flag at the Cloudflare API
+  // validation layer (10333). Wrangler's upload form deliberately omits
+  // `raw` for these two binding types in
+  // packages/wrangler/src/deployment-bundle/create-worker-upload-form.ts,
+  // so we mirror that here for the remote-binding-proxy upload.
+  | Extract<WorkerBindingSpec, { type: "ai_search" | "ai_search_namespace" }>;
 
 type BaseWorkerOptions = {
   [K in keyof miniflare.WorkerOptions]: K extends
@@ -85,6 +96,35 @@ export const buildWorkerOptions = async (
   for (const [key, binding] of Object.entries(input.bindings ?? {})) {
     if (typeof binding === "string") {
       (options.bindings ??= {})[key] = binding;
+      continue;
+    }
+    if (isAiSearch(binding)) {
+      // AI Search instance bindings are not supported natively by Miniflare;
+      // proxy them to the deployed instance via the `remote-binding-proxy`
+      // worker (same mechanism used by `ai`, `vectorize`, etc.). Instance
+      // bindings are always scoped to the default namespace on the CF side,
+      // so the namespace need not be surfaced in the remote-proxy metadata.
+      //
+      // Note: unlike `ai`/`browser`/`vectorize`, AI Search bindings must NOT
+      // carry `raw: true` — CF's API rejects that field on `ai_search` and
+      // `ai_search_namespace` bindings (error 10333). This mirrors wrangler's
+      // create-worker-upload-form.ts which also omits `raw` for these two
+      // binding types.
+      remoteBindings.push({
+        type: "ai_search",
+        name: key,
+        instance_name: binding.name,
+      });
+      continue;
+    }
+    if (isAiSearchNamespace(binding)) {
+      // See comment above on `ai_search`: `raw: true` is rejected by CF for
+      // this binding type, so we push without it.
+      remoteBindings.push({
+        type: "ai_search_namespace",
+        name: key,
+        namespace: binding.namespace,
+      });
       continue;
     }
     if (binding.type === "cloudflare::Worker::Self") {
@@ -259,6 +299,36 @@ export const buildWorkerOptions = async (
       }
       case "secret": {
         (options.bindings ??= {})[key] = binding.unencrypted;
+        break;
+      }
+      case "send_email": {
+        const config = {
+          name: key,
+          destination_address: binding.destinationAddress,
+          allowed_destination_addresses: binding.allowedDestinationAddresses,
+          allowed_sender_addresses: binding.allowedSenderAddresses,
+        };
+        if (isRemoteBinding(binding)) {
+          remoteBindings.push({
+            type: "send_email",
+            ...config,
+          });
+        } else {
+          ((
+            options as BaseWorkerOptions & {
+              email?: {
+                send_email?: Array<typeof config>;
+              };
+            }
+          ).email ??= {}).send_email ??= [];
+          (
+            options as BaseWorkerOptions & {
+              email: {
+                send_email: Array<typeof config>;
+              };
+            }
+          ).email.send_email.push(config);
+        }
         break;
       }
       case "secret_key": {
@@ -441,6 +511,41 @@ export const buildWorkerOptions = async (
             remoteProxyConnectionString: remoteProxy.connectionString,
           };
           break;
+        case "send_email":
+          ((
+            options as BaseWorkerOptions & {
+              email?: {
+                send_email?: Array<{
+                  name: string;
+                  destination_address?: string;
+                  allowed_destination_addresses?: string[];
+                  allowed_sender_addresses?: string[];
+                  remoteProxyConnectionString: typeof remoteProxy.connectionString;
+                }>;
+              };
+            }
+          ).email ??= {}).send_email ??= [];
+          (
+            options as BaseWorkerOptions & {
+              email: {
+                send_email: Array<{
+                  name: string;
+                  destination_address?: string;
+                  allowed_destination_addresses?: string[];
+                  allowed_sender_addresses?: string[];
+                  remoteProxyConnectionString: typeof remoteProxy.connectionString;
+                }>;
+              };
+            }
+          ).email.send_email.push({
+            name: binding.name,
+            destination_address: binding.destination_address,
+            allowed_destination_addresses:
+              binding.allowed_destination_addresses,
+            allowed_sender_addresses: binding.allowed_sender_addresses,
+            remoteProxyConnectionString: remoteProxy.connectionString,
+          });
+          break;
         case "service":
           (options.serviceBindings ??= {})[binding.name] = {
             name: binding.name,
@@ -456,6 +561,18 @@ export const buildWorkerOptions = async (
         case "vpc_service":
           (options.vpcServices ??= {})[binding.name] = {
             service_id: binding.service_id,
+            remoteProxyConnectionString: remoteProxy.connectionString,
+          };
+          break;
+        case "ai_search":
+          (options.aiSearchInstances ??= {})[binding.name] = {
+            instance_name: binding.instance_name,
+            remoteProxyConnectionString: remoteProxy.connectionString,
+          };
+          break;
+        case "ai_search_namespace":
+          (options.aiSearchNamespaces ??= {})[binding.name] = {
+            namespace: binding.namespace,
             remoteProxyConnectionString: remoteProxy.connectionString,
           };
           break;

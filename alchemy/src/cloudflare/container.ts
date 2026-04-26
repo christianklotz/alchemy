@@ -1,29 +1,34 @@
 import type { Context } from "../context.ts";
-import { Image, type ImageProps } from "../docker/image.ts";
+import { DockerApi } from "../docker/api.ts";
+import {
+  Image,
+  type DockerBuildOptions,
+  type ImageProps,
+} from "../docker/image.ts";
 import { pushImageToRegistry } from "../docker/registry.ts";
+import type { RemoteImage } from "../docker/remote-image.ts";
 import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
 import {
+  createCloudflareApi,
   type CloudflareApi,
   type CloudflareApiOptions,
-  createCloudflareApi,
 } from "./api.ts";
 
 /**
- * Properties for creating a Container binding or ContainerApplication
- *
- * Extends ImageProps for Docker image configuration and CloudflareApiOptions
- * for Cloudflare API authentication.
+ * Common properties shared between build and image container configurations
  */
-export interface ContainerProps
-  extends
-    Omit<ImageProps, "registry" | "skipPush">,
-    Partial<CloudflareApiOptions> {
+interface ContainerPropsBase extends Partial<CloudflareApiOptions> {
   /**
    * The class name for the container binding.
    * This is used to identify the container class in Worker bindings.
    */
   className: string;
+
+  /**
+   * Tag for the image (e.g., "latest")
+   */
+  tag?: string;
 
   /**
    * Maximum number of container instances that can be running.
@@ -91,6 +96,75 @@ export interface ContainerProps
    */
   rollout?: ContainerApplicationRollout;
 }
+
+/**
+ * Container configuration using an existing image reference
+ */
+interface ContainerPropsWithImage extends ContainerPropsBase {
+  /**
+   * Name for the container application.
+   *
+   * @default ${app}-${stage}-${id}
+   */
+  name?: string;
+
+  /**
+   * Image name or reference (e.g., "nginx:alpine")
+   *
+   * Use this when you want to deploy an existing image rather than building one.
+   * Cannot be used together with `build`.
+   */
+  image: string | Image | RemoteImage;
+
+  build?: never;
+}
+
+/**
+ * Container configuration that builds a Docker image
+ */
+interface ContainerPropsWithBuild extends ContainerPropsBase {
+  /**
+   * Name for the container application and image repository.
+   *
+   * @default ${app}-${stage}-${id}
+   */
+  name?: string;
+
+  /**
+   * Build configuration for the Docker image.
+   *
+   * Use this when you want to build an image from a Dockerfile.
+   * Cannot be used together with `image`.
+   */
+  build: DockerBuildOptions;
+
+  image?: never;
+}
+
+/**
+ * Properties for creating a Container binding or ContainerApplication
+ *
+ * Either provide `image` to use an existing image, or `build` to build from a Dockerfile.
+ * These options are mutually exclusive.
+ *
+ * @example
+ * // Using an existing image
+ * const container = await Container("my-container", {
+ *   className: "MyContainer",
+ *   image: "nginx:alpine"
+ * });
+ *
+ * @example
+ * // Building from a Dockerfile
+ * const container = await Container("my-container", {
+ *   className: "MyContainer",
+ *   build: {
+ *     context: "./app",
+ *     dockerfile: "Dockerfile"
+ *   }
+ * });
+ */
+export type ContainerProps = ContainerPropsWithImage | ContainerPropsWithBuild;
 
 /**
  * Instance types for Cloudflare Container deployments.
@@ -202,10 +276,60 @@ export type Container<T = any> = {
   __phantom?: T;
 };
 
+/**
+ * Normalize an image reference for Cloudflare Container deployments.
+ *
+ * Follows wrangler's resolveImageName logic:
+ * - Short names like "myapp:v1" → "registry.cloudflare.com/{accountId}/myapp:v1"
+ * - CF registry without accountId like "registry.cloudflare.com/myapp:v1" → adds accountId
+ * - External registries like "docker.io/nginx:1.25" → pass through unchanged
+ */
+export function resolveImageName(accountId: string, image: string): string {
+  const cfRegistry = getCloudflareContainerRegistry();
+
+  // Check if image has a registry prefix (contains a dot in the first segment)
+  const segments = image.split("/");
+  const hasRegistryPrefix = segments.length > 1 && segments[0].includes(".");
+
+  if (!hasRegistryPrefix) {
+    // Short name like "myapp:v1" → add CF registry + accountId
+    return `${cfRegistry}/${accountId}/${image}`;
+  }
+
+  if (image.startsWith(`${cfRegistry}/`)) {
+    // CF registry image - check if accountId is present
+    const afterRegistry = image.slice(`${cfRegistry}/`.length);
+    const segments = afterRegistry.split("/");
+
+    // If only one segment (e.g., "myapp:tag"), add accountId
+    // If first segment doesn't look like an accountId (32 hex chars), add it
+    if (segments.length === 1) {
+      return `${cfRegistry}/${accountId}/${afterRegistry}`;
+    }
+
+    // Check if first segment is the accountId (32 hex chars)
+    const possibleAccountId = segments[0];
+    const isAccountId = /^[a-f0-9]{32}$/.test(possibleAccountId);
+
+    if (!isAccountId) {
+      // First segment is not an accountId, prepend it
+      return `${cfRegistry}/${accountId}/${afterRegistry}`;
+    }
+  }
+
+  // External registry or already fully-qualified CF registry → pass through
+  return image;
+}
+
 export async function Container<T>(
   id: string,
   props: ContainerProps,
 ): Promise<Container<T>> {
+  // Validate that build and image are mutually exclusive
+  if (props.build && props.image) {
+    throw new Error("Container: specify either `build` or `image`, not both.");
+  }
+
   const scope = Scope.current;
   const name = props.name ?? scope.createPhysicalName(id);
   const tag =
@@ -230,6 +354,100 @@ export async function Container<T>(
   };
 
   const isDev = scope.local && !props.dev?.remote;
+
+  // Prebuilt image path: use as-is, no Docker pull/push
+  // This matches wrangler's behavior where registry URIs are passed directly
+  // to the Cloudflare API without any local Docker operations
+  if (props.image && !props.build) {
+    const rawImageRef =
+      typeof props.image === "string" ? props.image : props.image.imageRef;
+
+    if (isDev) {
+      // For local dev with prebuilt images, we need to pull and re-tag
+      const dockerApi = new DockerApi();
+      const devImageRef = `cloudflare-dev/${name}:${tag}`;
+
+      if (isCloudflareRegistryLink(rawImageRef)) {
+        // For CF registry images, authenticate before pulling
+        const api = await createCloudflareApi(props);
+        const credentials = await getContainerCredentials(api);
+        const cfRegistry = getCloudflareContainerRegistry();
+
+        await dockerApi.login(
+          cfRegistry,
+          credentials.username || credentials.user!,
+          credentials.password,
+        );
+
+        try {
+          // CF Containers run on linux/amd64, so we need to pull that platform
+          await dockerApi.pullImage(rawImageRef, { platform: "linux/amd64" });
+          await dockerApi.tagImage(rawImageRef, devImageRef);
+        } finally {
+          await dockerApi.logout(cfRegistry);
+        }
+
+        return {
+          ...output,
+          image: {
+            kind: "Image",
+            name: `cloudflare-dev/${name}`,
+            imageRef: devImageRef,
+            tag,
+            builtAt: Date.now(),
+            build: undefined,
+          },
+        };
+      }
+
+      // For external registry images in dev mode, pull and re-tag for Miniflare
+      const image = await Image(id, {
+        image: props.image,
+        tag,
+      });
+
+      await dockerApi.tagImage(image.imageRef, devImageRef);
+
+      return {
+        ...output,
+        image: {
+          ...image,
+          name: `cloudflare-dev/${name}`,
+          imageRef: devImageRef,
+        },
+      };
+    }
+
+    // Non-dev mode: normalize the image reference and use directly
+    const api = await createCloudflareApi(props);
+    const imageRef = resolveImageName(api.accountId, rawImageRef);
+
+    // Extract name and tag from the resolved reference
+    const [refWithoutDigest] = imageRef.split("@");
+    const lastColonIndex = refWithoutDigest.lastIndexOf(":");
+    const namePart =
+      lastColonIndex > -1
+        ? refWithoutDigest.slice(0, lastColonIndex)
+        : refWithoutDigest;
+    const tagPart =
+      lastColonIndex > -1 ? refWithoutDigest.slice(lastColonIndex + 1) : tag;
+
+    const image: Image = {
+      kind: "Image",
+      name: namePart,
+      imageRef,
+      tag: tagPart,
+      builtAt: Date.now(),
+      build: undefined,
+    };
+
+    return {
+      ...output,
+      image,
+    };
+  }
+
+  // Build path: build locally and push to Cloudflare registry
   if (isDev) {
     const image = await Image(id, {
       ...props,
